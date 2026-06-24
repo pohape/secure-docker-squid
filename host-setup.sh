@@ -11,15 +11,25 @@ if ! command -v fail2ban-client >/dev/null 2>&1; then
     sudo apt-get update && sudo apt-get install -y fail2ban
 fi
 
-# Ban IPs that repeatedly fail proxy auth (HTTP 407).
-# chain=DOCKER-USER is REQUIRED: traffic to a published container port is
-# filtered in FORWARD/DOCKER-USER, not INPUT — an INPUT jail would NOT block it.
+# Extend the stock squid filter to also catch auth failures (407) and 401/511,
+# not just 403 — repeated wrong-password attempts are what we mainly want to ban.
+sudo tee /etc/fail2ban/filter.d/squid.local >/dev/null <<'EOF'
+[Definition]
+failregex = ^\s*\S+\s+\d+\s+<HOST>\s+\S+/(401|403|407|511)\b
+EOF
+
+# Ban IPs that repeatedly fail proxy auth / hit denied ACLs.
+# - chain=DOCKER-USER: traffic to a published container port is filtered in
+#   FORWARD/DOCKER-USER, not INPUT — an INPUT jail would NOT block it.
+# - backend=polling: always watch the access.log FILE (never the systemd
+#   journal, which some distros default to and which has no squid data).
 sudo tee /etc/fail2ban/jail.d/squid.local >/dev/null <<EOF
 [squid]
 enabled  = true
 port     = 3128
 protocol = tcp
 filter   = squid
+backend  = polling
 logpath  = $LOGDIR/access.log
 chain    = DOCKER-USER
 maxretry = 5
@@ -27,7 +37,7 @@ findtime = 600
 bantime  = 3600
 EOF
 
-sudo systemctl enable --now fail2ban
+sudo systemctl enable fail2ban >/dev/null 2>&1 || true
 sudo systemctl restart fail2ban
 
 # --- log rotation (access.log/cache.log grow unbounded otherwise) ---
@@ -42,5 +52,4 @@ $LOGDIR/*.log {
 }
 EOF
 
-echo "host-setup done: fail2ban (DOCKER-USER) + logrotate"
-sudo fail2ban-client status squid || true
+echo "host-setup done: fail2ban (DOCKER-USER, polling, bans 401/403/407/511) + logrotate"
