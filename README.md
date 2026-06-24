@@ -1,90 +1,126 @@
 # secure-docker-squid
 
-A hardened, one-standard Squid forward-proxy in Docker. Clone it on any server,
-set credentials in `.env`, run `./up.sh` — every server ends up identical.
+A hardened **Squid forward proxy** in Docker — one standard you can deploy to any
+server in a couple of minutes. Security is baked into the image, credentials live
+only in a local `.env`, and a single script wires up brute-force protection and log
+rotation on the host.
 
-## Why this setup
+> Built for a fleet of VPSes: clone, set credentials, `up`. Every server ends up
+> byte-for-byte identical — no per-host hand-editing, no config drift.
 
-- **One standard, no drift** — same image and config on every VPS (no per-host hand-editing).
-- **Security baked into the image**, not bolted on per server:
-  - Basic auth required (no anonymous use).
-  - **CONNECT restricted to 80/443** — a leaked password can't be used to relay
-    spam (:25), reach databases/SSH, or port-scan from your server.
-  - No caching; client identity not leaked (`forwarded_for off`, `via off`).
-- **Credentials only in `.env`** (gitignored) — generated into the auth file at
-  container start. Nothing secret is ever committed (this repo is public).
-- **fail2ban + log rotation** via a one-shot host script.
+---
 
-> **Security note:** Basic-auth credentials are sent at connection time. The proxy
-> port is plain HTTP, so on untrusted networks the credentials are sniffable in
-> transit. For full protection add TLS on the proxy port (see *Optional: TLS*) or
-> reach the proxy over a VPN/SSH tunnel.
+## Features
 
-## Prerequisites
+- **Authentication required** — Basic auth, no anonymous use.
+- **CONNECT restricted to ports 80/443** — a leaked password can only be used for
+  ordinary web browsing. It cannot relay spam (`:25`), reach SSH/databases, or
+  port-scan from your server.
+- **No caching, no identity leaks** — `cache deny all`, `forwarded_for off`, `via off`.
+- **Secrets stay out of git** — credentials are read from `.env` (git-ignored) and
+  turned into the auth file at container start. Nothing sensitive is ever committed.
+- **Brute-force protection + log rotation** — one-shot `host-setup.sh` installs a
+  fail2ban jail and a logrotate policy.
+- **Reproducible** — fixed image + config; the same artifact runs everywhere.
 
-- Ubuntu with sudo, Docker Engine + Compose v2.
+---
 
-## Deploy
+## Quick start
 
 ```bash
-git clone git@github.com:pohape/secure-docker-squid.git
+git clone https://github.com/pohape/secure-docker-squid.git
 cd secure-docker-squid
+
 cp .env.example .env
-vim .env            # set PROXY_USER / PROXY_PASS (same on all servers) and PROXY_PORT
+$EDITOR .env          # set PROXY_USER / PROXY_PASS (shared across servers) + PROXY_PORT
 chmod 600 .env
-./up.sh             # build + start the container
-./host-setup.sh     # one-time: fail2ban jail (DOCKER-USER) + logrotate
+
+./up.sh               # build the image and start the container
+./host-setup.sh       # one-time: fail2ban jail + log rotation (run after up.sh)
 ```
 
-The proxy listens on `PROXY_PORT` (default `3128`) on all interfaces.
+The proxy then listens on `PROXY_PORT` (default `3128`) on all interfaces.
 
-## Test
+---
+
+## Configuration
+
+`.env` (copied from `.env.example`):
+
+| Variable | Description |
+|----------|-------------|
+| `PROXY_USER` | Proxy login (use the same value on every server). |
+| `PROXY_PASS` | Proxy password — use a long random string. |
+| `PROXY_PORT` | Host port to expose (default `3128`). |
+
+To rotate credentials: edit `.env`, then run `./up.sh` again — the auth file is
+regenerated on start.
+
+---
+
+## Test it
 
 ```bash
-# allowed: normal web (auth required)
-curl -x "http://USER:PASS@SERVER_IP:3128" -I http://example.com      # 200/3xx
-curl -x "http://USER:PASS@SERVER_IP:3128" -I https://example.com     # 200/3xx
-# rejected: wrong creds
-curl -x "http://USER:wrong@SERVER_IP:3128" -I http://example.com     # 407
-# blocked by CONNECT restriction: anything but :443
-curl -x "http://USER:PASS@SERVER_IP:3128" -I https://example.com:25  # blocked
+# allowed — normal web, with valid credentials
+curl -x "http://USER:PASS@SERVER:3128" -I http://example.com     # 200/3xx
+curl -x "http://USER:PASS@SERVER:3128" -I https://example.com    # 200/3xx
+
+# rejected — wrong credentials
+curl -x "http://USER:wrong@SERVER:3128" -I http://example.com    # 407
+
+# blocked — CONNECT to anything but :443
+curl -x "http://USER:PASS@SERVER:3128" -I https://example.com:25 # blocked
 ```
 
-## Use in Chrome
+---
 
-Point Chrome at `SERVER_IP:3128` (system proxy or a PAC file); it will prompt for
-the proxy username/password. Only ports 80/443 are proxied, which covers normal
-browsing.
+## Use it in Chrome
+
+Point Chrome at `SERVER:3128` (system proxy settings or a PAC file). Chrome will
+prompt for the proxy username and password. Only ports 80/443 are proxied, which
+covers normal browsing.
+
+---
 
 ## Operations
 
 ```bash
-docker logs -f squid          # live logs (also in ./log/)
-./down.sh                     # stop
-docker compose up -d --build  # update after editing config/Dockerfile
-# rotate creds: edit .env, then ./up.sh (recreates the auth file)
+docker logs -f squid            # live logs (also written to ./log/)
+./down.sh                       # stop and remove the container
+docker compose up -d --build    # apply changes to config or Dockerfile
 ```
 
-## Optional: TLS on the proxy port
+`host-setup.sh` installs:
 
-To stop sending Basic credentials in cleartext, terminate TLS on the proxy port so
-Chrome connects to it over HTTPS:
+- **fail2ban** jail `squid` — bans IPs that repeatedly fail proxy auth (HTTP 407).
+  It uses the `DOCKER-USER` iptables chain, which is required to filter traffic to a
+  published container port (a plain `INPUT` jail would not catch it).
+- **logrotate** for `./log/*.log` so the access/cache logs never grow unbounded.
 
-1. Provide a cert (Let's Encrypt for a hostname pointing at the server, or self-signed)
-   into `./ssl/squid.pem`.
-2. Add an `https_port` to `squid/squid.conf` and mount `./ssl`, then rebuild.
-3. Configure Chrome to use the proxy over `https://` (via PAC or a Secure Web Proxy).
+---
 
-(Left optional: many clients need PAC/flags for HTTPS proxies — enable per need.)
+## Security notes
 
-## Files
+- Basic-auth credentials are sent to the proxy on every request. The proxy port is
+  plain HTTP, so on an **untrusted network the credentials are sniffable in transit**.
+  Mitigations in place — a strong password and the 80/443 CONNECT restriction — limit
+  the damage, but do not prevent interception.
+- For full protection, terminate **TLS** in front of the proxy (so Chrome connects
+  over HTTPS) or reach it over a **VPN/SSH tunnel**. TLS on the proxy port requires a
+  publicly trusted certificate (e.g. Let's Encrypt for the server's hostname) and a
+  client configured for an HTTPS proxy (via PAC or `--proxy-server=https://`).
+- Keep the image up to date: `docker compose build --pull && docker compose up -d`.
+
+---
+
+## Repository layout
 
 | Path | Purpose |
 |------|---------|
-| `docker-compose.yml` | service definition, port, log bind-mount |
-| `squid/Dockerfile` | image (ubuntu/squid + apache2-utils) |
-| `squid/entrypoint.sh` | generates auth file from `.env`, launches squid |
-| `squid/squid.conf` | hardened config (auth + CONNECT 80/443) |
-| `up.sh` / `down.sh` | start / stop |
-| `host-setup.sh` | fail2ban (DOCKER-USER chain) + logrotate |
-| `.env.example` | credential template (no real secrets) |
+| `docker-compose.yml` | Service definition: port mapping, log bind-mount. |
+| `squid/Dockerfile` | Image: `ubuntu/squid` + `apache2-utils`. |
+| `squid/entrypoint.sh` | Builds the auth file from `.env`, then launches Squid. |
+| `squid/squid.conf` | Hardened config: auth + CONNECT 80/443 only. |
+| `up.sh` / `down.sh` | Start / stop. |
+| `host-setup.sh` | fail2ban jail (`DOCKER-USER`) + logrotate. |
+| `.env.example` | Credential template (no real secrets). |
