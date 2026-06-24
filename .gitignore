@@ -1,0 +1,15 @@
+# Secrets — never commit real credentials (public repo!)
+.env
+
+# Runtime logs (bind-mounted from the container)
+log/
+
+# Optional TLS material
+ssl/
+*.pem
+*.key
+*.crt
+
+# Generated auth file (if ever produced locally)
+passwd
+passwords

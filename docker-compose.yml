@@ -1,0 +1,10 @@
+services:
+  squid:
+    build: ./squid
+    container_name: squid
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "${PROXY_PORT:-3128}:3128"
+    volumes:
+      - ./log:/var/log/squid
